@@ -1,0 +1,186 @@
+name: Cypress Tests CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  CYPRESS_BASE_URL: ${{ secrets.CYPRESS_BASE_URL || 'https://front.serverest.dev/' }}
+  CYPRESS_API_URL: ${{ secrets.CYPRESS_API_URL || 'https://serverest.dev' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chrome, firefox, edge]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Cypress tests
+        run: npm run cypress:run:ci -- ${{ matrix.browser }}
+
+      - name: Merge Mochawesome reports (per browser)
+        if: always()
+        run: npm run report:merge
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cypress-reports-${{ matrix.browser }}
+          path: cypress/reports/
+          retention-days: 30
+
+      - name: Upload videos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cypress-videos-${{ matrix.browser }}
+          path: cypress/videos/
+          retention-days: 7
+
+      - name: Upload screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cypress-screenshots-${{ matrix.browser }}
+          path: cypress/screenshots/
+          retention-days: 7
+
+  report:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download all browser reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cypress-reports-*
+          path: downloaded-reports
+
+      - name: Consolidate reports across browsers
+        run: |
+          mkdir -p consolidated/json consolidated/flaky
+          for browser_dir in downloaded-reports/cypress-reports-*; do
+            browser=$(basename "$browser_dir" | sed 's/cypress-reports-//')
+            if [ -f "$browser_dir/mochawesome.json" ]; then
+              cp "$browser_dir/mochawesome.json" "consolidated/json/${browser}.json"
+            fi
+            if [ -f "$browser_dir/flaky-${browser}.json" ]; then
+              cp "$browser_dir/flaky-${browser}.json" "consolidated/flaky/${browser}.json"
+            fi
+          done
+          npx mochawesome-merge "consolidated/json/*.json" > consolidated/mochawesome.json
+          npx mochawesome-report-generator consolidated/mochawesome.json -f mochawesome-report -o consolidated
+
+      - name: Upload consolidated report
+        uses: actions/upload-artifact@v4
+        with:
+          name: cypress-consolidated-report
+          path: consolidated/
+          retention-days: 30
+
+      - name: Comment PR with consolidated results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const reportPath = 'consolidated/mochawesome.json';
+
+            let summary = '## 🧪 Resultado dos Testes Cypress\n\n';
+
+            if (fs.existsSync(reportPath)) {
+              const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+              const { tests, passes, failures, pending, duration } = report.stats;
+              const durationSec = (duration / 1000).toFixed(1);
+
+              summary += '| Total | Passou | Falhou | Pendente | Duração |\n';
+              summary += '|---|---|---|---|---|\n';
+              summary += `| ${tests} | ✅ ${passes} | ❌ ${failures} | ⏭️ ${pending} | ${durationSec}s |\n\n`;
+              summary += failures > 0
+                ? '❌ **Há falhas — revise antes de mergear.**\n\n'
+                : '✅ **Todos os testes passaram (Chrome, Firefox, Edge).**\n\n';
+            } else {
+              summary += '⚠️ Não foi possível gerar o relatório consolidado. Verifique os logs do job `report`.\n\n';
+            }
+
+            const flakyDir = 'consolidated/flaky';
+            const flakyTests = fs.existsSync(flakyDir)
+              ? fs.readdirSync(flakyDir).flatMap((file) => {
+                  const browser = file.replace('.json', '');
+                  const tests = JSON.parse(fs.readFileSync(`${flakyDir}/${file}`, 'utf8'));
+                  return tests.map((test) => ({ ...test, browser }));
+                })
+              : [];
+
+            if (flakyTests.length > 0) {
+              summary += `### ⚠️ ${flakyTests.length} teste(s) instável(is) (passou só após retry)\n\n`;
+              summary += '| Browser | Spec | Teste | Tentativas |\n';
+              summary += '|---|---|---|---|\n';
+              flakyTests.forEach((test) => {
+                summary += `| ${test.browser} | ${test.spec} | ${test.title} | ${test.attempts} |\n`;
+              });
+              summary += '\n';
+            }
+
+            summary += '📦 Relatório HTML completo: artifact `cypress-consolidated-report` deste run.\n';
+            summary += `🔗 [Ver execução](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID})\n`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary,
+            });
