@@ -182,15 +182,22 @@ serverest-cypress-tests/
 
 ## 🔐 Variáveis de Ambiente
 
-`baseUrl` e `apiUrl` já têm fallback público hardcoded em `cypress.config.js` — o projeto roda sem nenhuma configuração adicional.
+`baseUrl` e `apiUrl` podem ser configuradas no arquivo local `.env`, criado a partir de `.env.example`. O projeto também mantém fallbacks públicos em `cypress.config.js`, então continua rodando sem configuração adicional.
+
+```powershell
+Copy-Item .env.example .env
+```
+
+O arquivo `.env` é ignorado pelo Git. Nunca inclua tokens, senhas ou outras credenciais nele ou em qualquer arquivo versionado.
 
 `apiUrl` é lido nos testes com `cy.env(['apiUrl'])` (assíncrono — não o `Cypress.env()` estático, que está deprecado e desligado via `allowCypressEnv: false`).
 
 Ordem de resolução, do mais específico para o fallback:
 1. `--env apiUrl=...` na linha de comando (override pontual)
 2. `cypress.env.json` na raiz (override local, já no `.gitignore`), ex.: `{ "apiUrl": "http://localhost:3001" }`
-3. Variáveis de ambiente `CYPRESS_BASE_URL` / `CYPRESS_API_URL` (usadas no CI e para overrides locais)
-4. Fallback público hardcoded em `cypress.config.js`: `baseUrl` → `https://front.serverest.dev/`, `apiUrl` → `https://serverest.dev`
+3. Variáveis de ambiente `CYPRESS_BASE_URL` / `CYPRESS_API_URL` carregadas do `.env` (usadas no CI e para overrides locais)
+4. Variáveis de ambiente fornecidas diretamente pelo processo ou pela pipeline
+5. Fallback público hardcoded em `cypress.config.js`: `baseUrl` → `https://front.serverest.dev/`, `apiUrl` → `https://serverest.dev`
 
 Para apontar para outro ambiente localmente:
 ```bash
